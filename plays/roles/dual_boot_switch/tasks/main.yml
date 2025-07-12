@@ -1,0 +1,105 @@
+---
+- name: Ensure log directory exists
+  ansible.builtin.file:
+    path: "{{ log_dir }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  run_once: true
+  connection: local
+  register: log_dir_creation
+
+- name: Prepare Python environment
+  block:
+    - name: Check if virtualenv exists
+      ansible.builtin.stat:
+        path: "{{ venv_python }}"
+      register: venv_exists
+    - name: Create virtualenv if it does not exist
+      ansible.builtin.command:
+        cmd: python3 -m venv {{ venv_path }}
+      when: not venv_exists.stat.exists
+    - name: Install dependencies in virtualenv
+      ansible.builtin.pip:
+        requirements: "{{ requirements_file }}"
+        virtualenv: "{{ venv_path }}"
+        virtualenv_command: python3 -m venv
+
+- name: Get host IP via DNS
+  ansible.builtin.set_fact:
+    resolved_ips: >-
+      {{
+        resolved_ips | default({}) | combine({
+          item: lookup('dig', item + '/A') | default(item)
+        })
+      }}
+  loop: "{{ groups[nodes] }}"
+
+- name: Build host list (MAC + IP)
+  ansible.builtin.set_fact:
+    hosts_list: "{{ hosts_list | default([]) + [{
+      'ip': resolved_ips[host],
+      'mac': hostvars[host].mac
+    }] }}"
+  loop: "{{ groups[nodes] }}"
+  loop_control:
+    loop_var: host
+
+- name: Execute Wake on Lan script
+  ansible.builtin.command: >
+    '{{ venv_path }}/bin/python' wake_on_lan.py
+    '{{ hosts_list | to_json }}'
+  register: script_output
+  ignore_errors: true
+  args:
+    chdir: "{{ script_dir }}/files"
+  failed_when: script_output.rc == 1
+
+- name: Parse script JSON output
+  set_fact:
+    detected_os_map: "{{ (script_output.stdout_lines | select('search', '^{') | list | last) | from_json }}"
+  when: script_output.stdout_lines is defined and
+        (script_output.stdout_lines | select('search', '^{') | list | length > 0)
+
+- name: Handle script exit codes
+  block:
+    - name: Success case
+      ansible.builtin.debug:
+        msg: "All hosts woken successfully"
+      when: script_output.rc == 0
+    - name: Partial failure case
+      ansible.builtin.debug:
+        msg: "Some hosts failed - check {{ log_dir }}/wol_failures.log"
+      failed_when: false
+      changed_when: script_output.rc == 2
+      when: script_output.rc == 2
+    - name: Complete failure case
+      ansible.builtin.fail:
+        msg: "Critical failure. All hosts failed to wake up."
+      when: script_output.rc == 1
+  when: script_output is defined
+
+- name: Save failed hosts to log file
+  ansible.builtin.copy:
+    content: "{{ script_output.stdout | default('No failed hosts.') }}"
+    dest: >-
+      {{ log_dir }}/wol_failures_{{
+      lookup('pipe', 'date +%Y%m%d_%H%M%S')
+      }}.log"
+    mode: '0644'
+
+- name: Include tasks for Ubuntu
+  ansible.builtin.include_tasks: ubuntu.yml
+  vars:
+    ubuntu_hosts: "{{ detected_os_map.os_detected | dict2items | selectattr('value', 'equalto', 'ubuntu') | map(attribute='key') | list }}"
+    os_hosts_list: "{{ ubuntu_hosts }}"
+    desired_os: "{{ desired_os }}"
+  when: ubuntu_hosts | length > 0
+
+- name: Include tasks for Windows
+  ansible.builtin.include_tasks: windows.yml
+  vars:
+    windows_hosts: "{{ detected_os_map.os_detected | dict2items | selectattr('value', 'equalto', 'windows') | map(attribute='key') | list }}"
+    os_hosts_list: "{{ windows_hosts }}"
+    desired_os: "{{ desired_os }}"
+  when: windows_hosts | length > 0

@@ -1,0 +1,142 @@
+
+- name: Ensure /wake_on_lan_dual_boot directory exists
+  ansible.builtin.file:
+    path: /wake_on_lan_dual_boot
+    state: directory
+    mode: '0755'
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Ensure python3-venv is installed
+  ansible.builtin.apt:
+    name: python3-venv
+    state: present
+    update_cache: true
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Ensure python3-pip is installed
+  ansible.builtin.apt:
+    name: python3-pip
+    state: present
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Create virtualenv if it does not exist
+  ansible.builtin.command:
+    cmd: python3 -m venv /wake_on_lan_dual_boot/.venv
+  args:
+    creates: "/wake_on_lan_dual_boot/.venv"
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Copy requirements.txt to remote host
+  ansible.builtin.copy:
+    src: "{{ requirements_file }}"
+    dest: "/wake_on_lan_dual_boot/requirements.txt"
+    mode: '0644'
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Install dependencies in virtualenv
+  ansible.builtin.pip:
+    requirements: /wake_on_lan_dual_boot/requirements.txt
+    virtualenv: "/wake_on_lan_dual_boot/.venv"
+    virtualenv_command: python3 -m venv
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Copy Boot Switcher script to target host
+  ansible.builtin.copy:
+    src: "{{ script_dir }}/files/dual_boot_switcher.py"
+    dest: "/wake_on_lan_dual_boot/dual_boot_switcher.py"
+    mode: '0755'
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Execute Boot Switcher script
+  ansible.builtin.command: >
+    /wake_on_lan_dual_boot/.venv/bin/python /wake_on_lan_dual_boot/dual_boot_switcher.py
+    "{{ desired_os }}"
+  ignore_errors: true
+  async: 600
+  poll: 0
+  register: async_result
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+
+- name: Execute Check OS script
+  command: >
+   '{{ venv_python }}' check_os.py
+    '{{ hosts_list | to_json }}' '{{ desired_os }}'
+  register: script_output
+  ignore_errors: true
+  retries: 30
+  delay: 10
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+  args:
+    chdir: "{{ script_dir }}/files"
+  failed_when: script_output.rc == 1
+
+- name: Try to parse script JSON output
+  block:
+    - name: Try to load JSON
+      set_fact:
+        script_data: "{{ script_output.stdout | from_json }}"
+      when: script_output.stdout is defined and (script_output.stdout is match('^{'))
+
+  rescue:
+    - name: Fallback if invalid or absent JSON
+      set_fact:
+        script_data: {"mismatched_hosts": [], "failed_hosts": [{"ip": "unknown", "os_detected": "JSON parsing error"}]}
+
+- name: Register failed hosts
+  ansible.builtin.lineinfile:
+    path: "{{ log_dir }}/dual_boot_failures.log"
+    line: >
+      DETECTION_FAILURE - {{ '%Y-%m-%d %H:%M:%S' | strftime }} - 
+      Host: {{ item.ip }} - MAC: {{ item.mac | default('N/A') }} - 
+      Motivo: {{ item.os_detected }}
+    create: true
+    mode: '0644'
+  loop: "{{ script_data.failed_hosts | default([]) }}"
+  when: script_data.failed_hosts | default([]) | length > 0
+
+- name: Register mismatched hosts
+  ansible.builtin.lineinfile:
+    path: "{{ log_dir }}/os_mismatches.log"
+    line: >
+      OS_MISMATCH - {{ '%Y-%m-%d %H:%M:%S' | strftime }} - 
+      Host: {{ item.ip }} - MAC: {{ item.mac | default('N/A') }} - 
+      Current OS: {{ item.os_detected }} - Desired OS: {{ desired_os }}
+    create: true
+    mode: '0644'
+  loop: "{{ script_data.mismatched_hosts | default([]) }}"
+  when: script_data.mismatched_hosts | default([]) | length > 0

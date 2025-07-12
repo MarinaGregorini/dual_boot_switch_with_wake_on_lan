@@ -1,0 +1,125 @@
+- name: Wait for WinRM to become available on Windows hosts
+  wait_for_connection:
+    timeout: 300
+  delegate_to: "{{ item }}"
+  connection: winrm
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Ensure C:\wake_on_lan_dual_boot directory exists
+  win_file:
+    path: "C:\\wake_on_lan_dual_boot"
+    state: directory
+  connection: winrm
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Copy requirements.txt to remote host
+  win_copy:
+    src: "{{ requirements_file }}"
+    dest: "C:\\wake_on_lan_dual_boot\\requirements.txt"
+  connection: winrm
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Create virtualenv if it does not exist
+  win_command: >
+    python -m venv "C:\wake_on_lan_dual_boot\.venv"
+  args:
+    creates: "C:\\wake_on_lan_dual_boot\\.venv"
+  connection: winrm
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Install dependencies in virtualenv
+  win_command: >
+    C:\wake_on_lan_dual_boot\.venv\Scripts\pip.exe install -r C:\wake_on_lan_dual_boot\requirements.txt
+  connection: winrm
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Copy dual_boot_switcher.py script
+  win_copy:
+    src: "{{ script_dir }}/files/dual_boot_switcher.py"
+    dest: "C:\\wake_on_lan_dual_boot\\dual_boot_switcher.py"
+  connection: winrm
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Execute Boot Switcher script
+  become: True
+  become_method: runas
+  win_shell: |
+    Start-Process -FilePath "C:\wake_on_lan_dual_boot\.venv\Scripts\python.exe" `
+                  -ArgumentList "C:\wake_on_lan_dual_boot\dual_boot_switcher.py {{ desired_os }}" `
+                  -Verb RunAs `
+                  -Wait
+  async: 600
+  poll: 0
+  ignore_errors: true
+  connection: winrm
+  delegate_to: "{{ item }}"
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Execute Check OS script
+  command: >
+   '{{ venv_python }}' check_os.py
+    '{{ hosts_list | to_json }}' '{{ desired_os }}'
+  register: script_output
+  ignore_errors: true
+  retries: 30
+  delay: 10
+  loop: "{{ os_hosts_list }}"
+  loop_control:
+    label: "{{ item }}"
+  args:
+    chdir: "{{ script_dir }}/files"
+  failed_when: script_output.rc == 1
+
+- name: Try to parse JSON script output
+  block:
+    - name: Try to load JSON
+      set_fact:
+        script_data: "{{ script_output.stdout | from_json }}"
+      when: script_output.stdout is defined and (script_output.stdout is match('^{'))
+
+  rescue:
+    - name: Fallback if JSON invalid or absent
+      set_fact:
+        script_data: {"mismatched_hosts": [], "failed_hosts": [{"ip": "unknown", "os_detected": "JSON parsing error"}]}
+- name: Register failed hosts
+  ansible.builtin.lineinfile:
+    path: "{{ log_dir }}/dual_boot_failures.log"
+    line: >
+      DETECTION_FAILURE - {{ '%Y-%m-%d %H:%M:%S' | strftime }} - 
+      Host: {{ item.ip }} - MAC: {{ item.mac | default('N/A') }} - 
+      Motivo: {{ item.os_detected }}
+    create: true
+    mode: '0644'
+  loop: "{{ script_data.failed_hosts | default([]) }}"
+  when: script_data.failed_hosts | default([]) | length > 0
+
+- name: Register mismatched hosts
+  ansible.builtin.lineinfile:
+    path: "{{ log_dir }}/os_mismatches.log"
+    line: >
+      OS_MISMATCH - {{ '%Y-%m-%d %H:%M:%S' | strftime }} - 
+      Host: {{ item.ip }} - MAC: {{ item.mac | default('N/A') }} - 
+      Current OS: {{ item.os_detected }} - Desired OS: {{ desired_os }}
+    create: true
+    mode: '0644'
+  loop: "{{ script_data.mismatched_hosts | default([]) }}"
+  when: script_data.mismatched_hosts | default([]) | length > 0

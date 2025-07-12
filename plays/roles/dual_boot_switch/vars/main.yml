@@ -1,0 +1,6 @@
+---
+script_dir: "{{ playbook_dir }}/roles/dual_boot_switch"
+venv_path: "{{ script_dir }}/.venv"
+venv_python: "{{ venv_path }}/bin/python"
+requirements_file: "{{ script_dir }}/requirements.txt"
+log_dir: "{{ script_dir }}/logs"

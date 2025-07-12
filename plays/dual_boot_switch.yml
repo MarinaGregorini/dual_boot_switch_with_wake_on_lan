@@ -1,0 +1,23 @@
+---
+- name: Wake on Lan with Dual Boot Switch
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../secrets.yml
+  vars:
+    nodes: "{{ nodes | default('test') }}"
+    desired_os: "{{ desired_os | default('lastos') }}"
+    ansible_become_pass: "{{ ssh_password_imagem_lab }}"
+    ansible_user: "{{ ssh_username_imagem_lab }}"
+    ansible_ssh_pass: "{{ ssh_password_imagem_lab }}"
+    ansible_runas_pass: "{{ ssh_password_imagem_lab }}"
+    ansible_runas_user: "{{ ssh_username_imagem_lab }}"
+    ansible_winrm_port: 5985
+    ansible_winrm_scheme: http
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null'
+  environment:
+    SUDO_PASSWORD: "{{ ssh_password_imagem_lab }}"
+    SUDO_USER: "{{ ssh_username_imagem_lab }}"
+
+  roles:
+    - dual_boot_switch
