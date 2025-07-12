@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Dual Boot Switch With Wake-on-LAN Role
 
 An Ansible role for remotely switching between Windows and Ubuntu in a dual-boot system using Wake-on-LAN, SSH e WinRM.
@@ -149,4 +150,3 @@ Logs são salvos automaticamente em:
 * **Erro de parsing JSON:** logs indicarão problemas com os scripts Python
 
 ---
-
